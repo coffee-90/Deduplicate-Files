@@ -11,10 +11,10 @@ function Format-Size ([long]$bytes) {
     else { "$bytes Bytes" }
 }
 
-# Fungsi cerdas mencari huruf Drive (Z, Y, X, dll) yang sedang tidak dipakai
+# Fungsi mencari huruf Drive kosong untuk bypass Long Path
 function Get-FreeDriveLetter {
     $usedDrives = [System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0,1) }
-    $allDrives = 90..67 | ForEach-Object { [char]$_ } # Huruf Z mundur hingga C
+    $allDrives = 90..67 | ForEach-Object { [char]$_ } # Dari Z mundur ke C
     foreach ($drive in $allDrives) {
         if ($usedDrives -notcontains $drive) {
             return "$drive`:"
@@ -26,10 +26,9 @@ function Get-FreeDriveLetter {
 Write-Host "===================================================" -ForegroundColor Cyan
 Write-Host " Memulai Deduplikasi Menggunakan Shortcut (.lnk)" -ForegroundColor Cyan
 Write-Host " Target Folder : $TargetFolder" -ForegroundColor Cyan
-Write-Host " Fitur Tambahan: Bypass Batasan Long Path (Subst)" -ForegroundColor DarkGray
 Write-Host "===================================================" -ForegroundColor Cyan
 
-# Mengambil semua file menggunakan -LiteralPath agar lebih aman pada karakter unik
+# Mengambil semua file (kecuali .lnk)
 $allFiles = Get-ChildItem -LiteralPath $TargetFolder -Recurse -File | Where-Object { $_.Extension -ne '.lnk' }
 
 $totalSizeBefore = ($allFiles | Measure-Object -Property Length -Sum).Sum
@@ -65,56 +64,54 @@ foreach ($group in $duplicates) {
         $duplicateFile = $group.Group[$i].Path
         $duplicateDir = Split-Path $duplicateFile
         $duplicateName = Split-Path $duplicateFile -Leaf
-
-        $totalDeletedSize += $sizeMap[$duplicateFile]
-
-        # Hapus file duplikat fisik
-        Remove-Item -LiteralPath $duplicateFile -Force
         
         $shortcutPath = Join-Path -Path $duplicateDir -ChildPath "$duplicateName.lnk"
+        $freeDrive = $null
         
-        # --- BYPASS LONG PATH LIMITATION UNTUK PEMBUATAN SHORTCUT ---
-        if ($shortcutPath.Length -ge 248) {
-            $freeDrive = Get-FreeDriveLetter
-            if ($freeDrive) {
-                # Map folder target ke Drive Virtual sementara (contoh: Z:)
-                & cmd.exe /c "subst $freeDrive `"$duplicateDir`""
-                
-                # Buat shortcut di root drive virtual yang path-nya dijamin pendek
-                $virtualShortcutPath = "$freeDrive\$duplicateName.lnk"
-                $shortcut = $WshShell.CreateShortcut($virtualShortcutPath)
-                
-                # Jika file Master juga sangat panjang, gunakan format Universal Naming \\?\
-                if ($masterFile.Length -ge 260) {
-                    $shortcut.TargetPath = "\\?\$masterFile"
-                } else {
+        try {
+            # --- BYPASS LONG PATH UNTUK PEMBUATAN SHORTCUT ---
+            if ($shortcutPath.Length -ge 248) {
+                $freeDrive = Get-FreeDriveLetter
+                if ($freeDrive) {
+                    & cmd.exe /c "subst $freeDrive `"$duplicateDir`""
+                    $virtualShortcutPath = "$freeDrive\$duplicateName.lnk"
+                    
+                    $shortcut = $WshShell.CreateShortcut($virtualShortcutPath)
                     $shortcut.TargetPath = $masterFile
+                    $shortcut.Save()
+                    
+                    & cmd.exe /c "subst $freeDrive /D" | Out-Null
+                } else {
+                    Write-Host " [!] Diabaikan: Path sangat panjang & tidak ada Drive letter kosong." -ForegroundColor Yellow
+                    continue
                 }
-                
-                $shortcut.Save()
-                
-                # Lepaskan pemetaan Drive Virtual setelah proses simpan berhasil
-                & cmd.exe /c "subst $freeDrive /D"
             } else {
-                Write-Host " [!] Gagal: Path terlalu panjang & tidak ada Drive letter kosong untuk Bypass." -ForegroundColor Red
-                continue
-            }
-        } else {
-            # Cara normal jika Path pendek di bawah limit
-            $shortcut = $WshShell.CreateShortcut($shortcutPath)
-            if ($masterFile.Length -ge 260) {
-                $shortcut.TargetPath = "\\?\$masterFile"
-            } else {
+                # Normal mode
+                $shortcut = $WshShell.CreateShortcut($shortcutPath)
                 $shortcut.TargetPath = $masterFile
+                $shortcut.Save()
             }
-            $shortcut.Save()
-        }
 
-        # Hitung ukuran shortcut yang baru dibuat untuk kalkulasi akhir
-        if (Test-Path -LiteralPath $shortcutPath) {
-            $newShortcutSize = (Get-Item -LiteralPath $shortcutPath).Length
-            $totalShortcutSize += $newShortcutSize
-            Write-Host " [~] Diganti jadi Shortcut: $duplicateName.lnk" -ForegroundColor DarkCyan
+            # PENGAMANAN BARU: Hapus file duplikat HANYA jika proses save shortcut di atas berhasil tanpa error
+            Remove-Item -LiteralPath $duplicateFile -Force
+            $totalDeletedSize += $sizeMap[$duplicateFile]
+
+            # Hitung ukuran shortcut yang baru dibuat
+            if (Test-Path -LiteralPath $shortcutPath) {
+                $newShortcutSize = (Get-Item -LiteralPath $shortcutPath).Length
+                $totalShortcutSize += $newShortcutSize
+                Write-Host " [~] Diganti jadi Shortcut: $duplicateName.lnk" -ForegroundColor DarkCyan
+            }
+
+        } catch {
+            # Jika WScript.Shell menolak membuat shortcut (biasanya karena limitasi lawas internalnya), 
+            # abaikan file tersebut dan jangan dihapus agar data Anda tetap aman.
+            Write-Host " [!] Gagal diproses: Shortcut gagal dibuat untuk '$duplicateName'. File asli tetap aman." -ForegroundColor Red
+            
+            # Bersihkan virtual drive jika nyangkut
+            if ($freeDrive) {
+                & cmd.exe /c "subst $freeDrive /D" 2>$null
+            }
         }
     }
 }
