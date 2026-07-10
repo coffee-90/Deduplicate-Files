@@ -11,10 +11,9 @@ function Format-Size ([long]$bytes) {
     else { "$bytes Bytes" }
 }
 
-# Fungsi mencari huruf Drive kosong untuk bypass Long Path
 function Get-FreeDriveLetter {
     $usedDrives = [System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0,1) }
-    $allDrives = 90..67 | ForEach-Object { [char]$_ } # Dari Z mundur ke C
+    $allDrives = 90..67 | ForEach-Object { [char]$_ } 
     foreach ($drive in $allDrives) {
         if ($usedDrives -notcontains $drive) {
             return "$drive`:"
@@ -28,12 +27,14 @@ Write-Host " Memulai Deduplikasi Menggunakan Shortcut (.lnk)" -ForegroundColor C
 Write-Host " Target Folder : $TargetFolder" -ForegroundColor Cyan
 Write-Host "===================================================" -ForegroundColor Cyan
 
-# Mengambil semua file (kecuali .lnk)
 $allFiles = Get-ChildItem -LiteralPath $TargetFolder -Recurse -File | Where-Object { $_.Extension -ne '.lnk' }
 
 $totalSizeBefore = ($allFiles | Measure-Object -Property Length -Sum).Sum
 $totalDeletedSize = 0
 $totalShortcutSize = 0
+
+# --- Array baru untuk menampung daftar file yang error ---
+$errorList = @()
 
 $sizeMap = @{}
 foreach ($file in $allFiles) {
@@ -69,7 +70,6 @@ foreach ($group in $duplicates) {
         $freeDrive = $null
         
         try {
-            # --- BYPASS LONG PATH UNTUK PEMBUATAN SHORTCUT ---
             if ($shortcutPath.Length -ge 248) {
                 $freeDrive = Get-FreeDriveLetter
                 if ($freeDrive) {
@@ -83,20 +83,19 @@ foreach ($group in $duplicates) {
                     & cmd.exe /c "subst $freeDrive /D" | Out-Null
                 } else {
                     Write-Host " [!] Diabaikan: Path sangat panjang & tidak ada Drive letter kosong." -ForegroundColor Yellow
+                    # Catat ke daftar error
+                    $errorList += [PSCustomObject]@{ File = $duplicateFile; Alasan = "Path terlalu panjang, Bypass penuh" }
                     continue
                 }
             } else {
-                # Normal mode
                 $shortcut = $WshShell.CreateShortcut($shortcutPath)
                 $shortcut.TargetPath = $masterFile
                 $shortcut.Save()
             }
 
-            # PENGAMANAN BARU: Hapus file duplikat HANYA jika proses save shortcut di atas berhasil tanpa error
             Remove-Item -LiteralPath $duplicateFile -Force
             $totalDeletedSize += $sizeMap[$duplicateFile]
 
-            # Hitung ukuran shortcut yang baru dibuat
             if (Test-Path -LiteralPath $shortcutPath) {
                 $newShortcutSize = (Get-Item -LiteralPath $shortcutPath).Length
                 $totalShortcutSize += $newShortcutSize
@@ -104,11 +103,11 @@ foreach ($group in $duplicates) {
             }
 
         } catch {
-            # Jika WScript.Shell menolak membuat shortcut (biasanya karena limitasi lawas internalnya), 
-            # abaikan file tersebut dan jangan dihapus agar data Anda tetap aman.
-            Write-Host " [!] Gagal diproses: Shortcut gagal dibuat untuk '$duplicateName'. File asli tetap aman." -ForegroundColor Red
+            Write-Host " [!] Gagal diproses: Shortcut gagal dibuat untuk '$duplicateName'." -ForegroundColor Red
             
-            # Bersihkan virtual drive jika nyangkut
+            # --- Mencatat file yang error dan alasan kegagalannya ---
+            $errorList += [PSCustomObject]@{ File = $duplicateFile; Alasan = $_.Exception.Message }
+            
             if ($freeDrive) {
                 & cmd.exe /c "subst $freeDrive /D" 2>$null
             }
@@ -126,3 +125,17 @@ Write-Host " Total Ukuran Sebelum : $(Format-Size $totalSizeBefore)" -Foreground
 Write-Host " Total Ukuran Sesudah : $(Format-Size $totalSizeAfter)" -ForegroundColor Green
 Write-Host " Total Ruang Dihemat  : $(Format-Size $totalSpaceSaved)" -ForegroundColor Yellow
 Write-Host "===================================================" -ForegroundColor Cyan
+
+# --- Menampilkan Daftar File yang Error di Akhir Proses ---
+if ($errorList.Count -gt 0) {
+    Write-Host "`n===================================================" -ForegroundColor Red
+    Write-Host " DAFTAR FILE GAGAL DIPROSES" -ForegroundColor Red
+    Write-Host " File-file di bawah ini tidak dihapus demi keamanan data." -ForegroundColor Yellow
+    Write-Host "===================================================" -ForegroundColor Red
+    
+    foreach ($err in $errorList) {
+        Write-Host " - Path  : $($err.File)" -ForegroundColor White
+        Write-Host "   Error : $($err.Alasan)" -ForegroundColor Gray
+    }
+    Write-Host "===================================================" -ForegroundColor Red
+}
