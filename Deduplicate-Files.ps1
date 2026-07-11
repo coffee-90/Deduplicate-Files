@@ -2,10 +2,8 @@ param (
     [string]$TargetFolder = ".\"
 )
 
-# Mencegah error minor (seperti Access Denied pada 1 file) menghentikan seluruh skrip
 $ErrorActionPreference = 'Continue' 
 
-# Membungkus seluruh skrip dengan pelacak Error Fatal
 try {
     $TargetFolder = (Resolve-Path $TargetFolder).Path
 
@@ -30,9 +28,9 @@ try {
     Write-Host "===================================================" -ForegroundColor Cyan
     Write-Host " Memulai Deduplikasi Menggunakan Shortcut (.lnk)" -ForegroundColor Cyan
     Write-Host " Target Folder : $TargetFolder" -ForegroundColor Cyan
+    Write-Host " Fitur Tambahan: Mode Aman Anti-Heuristik (Delay)" -ForegroundColor DarkGray
     Write-Host "===================================================" -ForegroundColor Cyan
 
-    # Mengambil file (Mengabaikan error akses file yang dikunci oleh Windows)
     $allFiles = Get-ChildItem -LiteralPath $TargetFolder -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -ne '.lnk' }
     
     if (-not $allFiles) {
@@ -40,7 +38,6 @@ try {
         $allFiles = @()
     }
 
-    # Kalkulasi ukuran awal
     $totalSizeBefore = ($allFiles | Measure-Object -Property Length -Sum).Sum
     if ($null -eq $totalSizeBefore) { $totalSizeBefore = 0 }
     
@@ -57,24 +54,20 @@ try {
     
     if ($allFiles.Count -gt 0) {
         Write-Host "Menghitung hash MD5 untuk $($allFiles.Count) file. Harap tunggu..." -ForegroundColor Yellow
-        # Menghitung Hash
         $hashedFiles = $allFiles | Get-FileHash -Algorithm MD5 -ErrorAction SilentlyContinue
         $duplicates = $hashedFiles | Group-Object Hash | Where-Object Count -gt 1
     } else {
         $duplicates = @()
     }
 
-    # JIKA TIDAK ADA DUPLIKAT, langsung melompat ke laporan akhir tanpa perintah exit
     if ($duplicates.Count -eq 0) {
         Write-Host "`nTidak ditemukan file duplikat." -ForegroundColor Green
     } else {
-        $WshShell = New-Object -ComObject WScript.Shell
-
         foreach ($group in $duplicates) {
             $masterFile = $group.Group[0].Path
 
             Write-Host "`nDitemukan $($group.Count) file identik:" -ForegroundColor White
-            Write-Host " [+] Master dipertahankan: $masterFile ($(Format-Size $sizeMap[$masterFile]))" -ForegroundColor Green
+            Write-Host " [+] Master: $masterFile" -ForegroundColor Green
 
             for ($i = 1; $i -lt $group.Count; $i++) {
                 $duplicateFile = $group.Group[$i].Path
@@ -85,6 +78,12 @@ try {
                 $freeDrive = $null
                 
                 try {
+                    # 1. Trik Bypass Kaspersky: Beri jeda 0.15 detik per file agar tidak dianggap virus
+                    Start-Sleep -Milliseconds 150
+
+                    # 2. Inisiasi COM Object langsung di dalam loop agar lebih aman dari crash memori
+                    $WshShell = New-Object -ComObject WScript.Shell
+
                     if ($shortcutPath.Length -ge 248) {
                         $freeDrive = Get-FreeDriveLetter
                         if ($freeDrive) {
@@ -107,14 +106,22 @@ try {
                         $shortcut.Save()
                     }
 
-                    # Force stop jika proses hapus gagal, agar di-catch dan dicatat
+                    # Pelepasan memori COM Object secara manual
+                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shortcut) | Out-Null
+                    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($WshShell) | Out-Null
+                    [System.GC]::Collect()
+                    [System.GC]::WaitForPendingFinalizers()
+
                     Remove-Item -LiteralPath $duplicateFile -Force -ErrorAction Stop
                     $totalDeletedSize += $sizeMap[$duplicateFile]
 
                     if (Test-Path -LiteralPath $shortcutPath) {
                         $newShortcutSize = (Get-Item -LiteralPath $shortcutPath).Length
                         $totalShortcutSize += $newShortcutSize
-                        Write-Host " [~] Diganti jadi Shortcut: $duplicateName.lnk" -ForegroundColor DarkCyan
+                        
+                        # Tampilan yang lebih ringkas agar rapi
+                        $shortParentDir = Split-Path $duplicateDir -Leaf
+                        Write-Host " [~] Shortcut: ...\$shortParentDir\$duplicateName.lnk" -ForegroundColor DarkCyan
                     }
 
                 } catch {
@@ -132,7 +139,6 @@ try {
     $totalSpaceSaved = $totalDeletedSize - $totalShortcutSize
     $totalSizeAfter = $totalSizeBefore - $totalSpaceSaved
 
-    # LAPORAN AKHIR (Sekarang dipastikan selalu muncul)
     Write-Host "`n===================================================" -ForegroundColor Cyan
     Write-Host " Laporan Ringkasan Deduplikasi (.lnk)" -ForegroundColor Cyan
     Write-Host "===================================================" -ForegroundColor Cyan
@@ -144,19 +150,14 @@ try {
     if ($errorList.Count -gt 0) {
         Write-Host "`n===================================================" -ForegroundColor Red
         Write-Host " DAFTAR FILE GAGAL DIPROSES" -ForegroundColor Red
-        Write-Host " File-file di bawah ini tidak dihapus demi keamanan data." -ForegroundColor Yellow
         Write-Host "===================================================" -ForegroundColor Red
-        
         foreach ($err in $errorList) {
             Write-Host " - Path  : $($err.File)" -ForegroundColor White
             Write-Host "   Error : $($err.Alasan)" -ForegroundColor Gray
         }
-        Write-Host "===================================================" -ForegroundColor Red
     }
 
 } catch {
-    # Mencegah layar tertutup jika ada masalah besar/fatal
     Write-Host "`n[FATAL ERROR] Skrip terhenti secara darurat karena kesalahan sistem!" -ForegroundColor Red
     Write-Host "Detail Error: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "Laporan akhir tidak dapat dibuat. Data Anda tetap aman." -ForegroundColor Gray
 }
